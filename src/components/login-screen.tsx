@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-export function LoginScreen({ lock, onAuthenticated, message, maxSessions = 3 }: {
+export function LoginScreen({ lock, onAuthenticated, message, maxSessions = 0 }: {
   lock: "ready" | "unset" | "expired";
   onAuthenticated: (sessionId: string) => void;
   message?: string;
@@ -103,8 +103,11 @@ export function LoginScreen({ lock, onAuthenticated, message, maxSessions = 3 }:
                 </button>
                 <p className="mt-3 text-center text-xs leading-5 text-slate-400">
                   每次重新打开或刷新网页均需输入密码。本桌面支持
-                  <span className="mx-1 font-semibold text-sky-300">最多 {maxSessions} 人同时在线</span>
-                  ，超出时最早登录的那位会被自动下线；桌面窗口与文件在所有人之间同步保留。
+                  <span className="mx-1 font-semibold text-sky-300">
+                    {maxSessions > 0 ? `最多 ${maxSessions} 人同时在线` : "不限人数、多人同时在线"}
+                  </span>
+                  {maxSessions > 0 ? "，超出时最早登录的那位会被自动下线" : "，任意数量的访问密码登录都不会被挤下线"}
+                  ；桌面窗口与文件在所有人之间同步保留。
                 </p>
               </>
             ) : (

@@ -1,18 +1,20 @@
-# des11 WebDesktop（多人并发登录版）
+# ccvnc WebDesktop（多人并发 · XFCE4 + TigerVNC 版）
 
 基于 Next.js 16 + PostgreSQL + Drizzle ORM 的网页桌面系统。
 本仓库在上游 [nocproen/des11](https://github.com/nocproen/des11.git) 基础上做了两件事：
 
 1. **补全运行环境**（依赖、壁纸资源、`.env`、数据库表、修复原有 TypeScript 编译错误）
-2. **把「只能一个人登录」改成「最多 3 个人同时在线」**（人数可配置）
+2. **删除「只能 3 个人同时登录」的上限**（默认不限人数，可用 `DESKTOP_MAX_SESSIONS` 重新收紧）
+3. **修复后台「服务器终端」打不开**：`/api/admin-term/ws` 的 WebSocket 升级请求以前排在「桌面会话」总闸门之后，而后台页面没有 `wd_session` Cookie，握手一律被 401 拒绝；现已改为单独走管理员 Cookie(`wd_admin`) 鉴权
+4. **补全图形环境**：`xfce4` + `tigervncserver`（`~/.vnc/xstartup` → `exec startxfce4`，默认 `:1` / 5901）
 
 ---
 
 ## 一、一键部署
 
 ```bash
-# 全自动部署（默认 3 人同时在线）
-curl -fsSL https://raw.githubusercontent.com/nocproen/des11/master/scripts/deploy.sh -o deploy.sh
+# 全自动部署（默认不限同时在线人数）
+curl -fsSL https://raw.githubusercontent.com/nocproen/ccvnc/master/scripts/deploy.sh -o deploy.sh
 bash deploy.sh
 
 # 或在已克隆的目录里就地部署
@@ -24,7 +26,7 @@ bash scripts/deploy.sh
 | 参数 | 说明 |
 | --- | --- |
 | `--port 8080` | 监听端口（默认 3000） |
-| `--max-sessions 5` | **同时在线人数**（1 = 旧的单人独占模式） |
+| `--max-sessions 0` | **同时在线人数**（0 = 不限制【默认】；1 = 旧的单人独占模式） |
 | `--db-url postgresql://u:p@host:5432/db` | 使用外部 PostgreSQL，跳过本机安装 |
 | `--desktop-password xxx` / `--admin-password xxx` | 指定密码（默认随机生成并在结尾打印） |
 | `--admin-path ops-xxxx` | 后台入口路径 |
@@ -54,7 +56,7 @@ bash scripts/deploy.sh
 另外浏览器端还有一个 `BroadcastChannel("webdesktop-exclusive-session")`，
 会主动把同一浏览器的其他标签页踢掉。
 
-### 改造后（默认 3 人）
+### 改造后（默认不限人数）
 
 | 位置 | 改动 |
 | --- | --- |
@@ -157,8 +159,8 @@ bash scripts/deploy.sh
 ### 调整人数
 
 ```bash
-# 方式一：改 .env 后重启
-DESKTOP_MAX_SESSIONS=5
+# 方式一：改 .env 后重启（0 = 不限制，这也是当前默认值）
+DESKTOP_MAX_SESSIONS=0
 
 # 方式二：用部署脚本
 bash scripts/deploy.sh --max-sessions 5

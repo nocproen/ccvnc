@@ -443,7 +443,9 @@ function DesktopPassword({ state, api, reload }: { state: State; api: Api; reloa
             <dt className="text-slate-500">在线人数</dt>
             <dd>
               <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-xs tabular-nums text-emerald-200">
-                {state.seats?.online ?? 0} / {state.seats?.max ?? 3}
+                {(state.seats?.max ?? 0) > 0
+                  ? `${state.seats?.online ?? 0} / ${state.seats?.max}`
+                  : `${state.seats?.online ?? 0} / 不限`}
               </span>
               <span className="ml-2 text-xs text-slate-500">支持多人同时登录，满员后最早登录者自动下线</span>
             </dd>

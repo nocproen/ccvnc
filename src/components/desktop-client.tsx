@@ -7,7 +7,7 @@ import ExternalFullscreen from "@/components/external-fullscreen";
 
 type LockState = "ready" | "unset" | "expired";
 
-export default function DesktopClient({ lock, maxSessions = 3 }: { lock: LockState; maxSessions?: number }) {
+export default function DesktopClient({ lock, maxSessions = 0 }: { lock: LockState; maxSessions?: number }) {
   const [session, setSession] = useState<string | null>(null);
   const [wasKicked, setWasKicked] = useState(false);
   const cleanup = useRef<(() => void) | null>(null);
@@ -98,7 +98,9 @@ export default function DesktopClient({ lock, maxSessions = 3 }: { lock: LockSta
         onAuthenticated={enter}
         message={
           wasKicked
-            ? `在线人数已满（最多 ${maxSessions} 人同时在线），当前页面被新的登录挤下线，或访问密码已变更。请重新输入密码。`
+            ? maxSessions > 0
+              ? `在线人数已满（最多 ${maxSessions} 人同时在线），当前页面被新的登录挤下线，或访问密码已变更。请重新输入密码。`
+              : "当前页面的登录已失效（可能被管理员强制下线，或访问密码已变更）。请重新输入密码。"
             : undefined
         }
       />

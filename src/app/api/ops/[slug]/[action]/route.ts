@@ -89,7 +89,7 @@ async function handle(req: Request, ctx: Ctx, method: "GET" | "POST") {
 
   if (action === "state" && method === "GET") {
     const desktop = await getDesktopStatus();
-    const seatInfo = await getDesktopSeats().catch(() => ({ online: 0, max: 3, sessions: [] }));
+    const seatInfo = await getDesktopSeats().catch(() => ({ online: 0, max: 0, sessions: [] }));
     return json({
       username: admin.username,
       mustChange: admin.mustChange,

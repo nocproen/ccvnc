@@ -446,6 +446,25 @@ function attach(server: http.Server) {
   const onUpgrade = async (req: http.IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? "/", "http://x");
     const access = url.searchParams.get("access");
+
+    // 后台终端单独鉴权：只认管理员 Cookie(wd_admin)。
+    // 修复：这条路径以前排在「桌面会话」总闸门之后，而后台页面根本没有 wd_session Cookie，
+    // 于是升级请求一律被 401 拒绝，表现为「后台终端打不开 / 一直启动中」。
+    if (url.pathname === ADMIN_TERM_PATH) {
+      let admin: unknown = null;
+      try {
+        admin = await adminTermAuthorize(req.headers.cookie);
+      } catch {
+        admin = null;
+      }
+      if (!admin) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      return termUpgrade(wss, req, socket, head, url, adminTermAuthorize);
+    }
+
     // Cookie 和网页独有的会话标识均需有效，旧页面无法续用新 Cookie。
     if (!(await desktopAuthedHeader(req.headers.cookie, access))) {
       socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");

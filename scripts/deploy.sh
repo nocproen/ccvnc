@@ -17,7 +17,7 @@ set -Eeuo pipefail
 
 # ----------------------------- 可配置项（均可用环境变量或参数覆盖） ----------
 APP_NAME="${APP_NAME:-des11}"
-REPO_URL="${REPO_URL:-https://github.com/nocproen/des11.git}"
+REPO_URL="${REPO_URL:-https://github.com/nocproen/ccvnc.git}"
 REPO_BRANCH="${REPO_BRANCH:-}"                 # 留空 = 远端默认分支
 APP_DIR="${APP_DIR:-}"                          # 留空 = 自动推断
 PORT="${PORT:-3000}"
@@ -30,7 +30,7 @@ DESKTOP_PASSWORD="${DESKTOP_PASSWORD:-}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 ADMIN_PATH="${ADMIN_PATH:-}"
-DESKTOP_MAX_SESSIONS="${DESKTOP_MAX_SESSIONS:-3}"   # ★ 同时在线人数，默认 3
+DESKTOP_MAX_SESSIONS="${DESKTOP_MAX_SESSIONS:-0}"   # ★ 同时在线人数，0 = 不限制（3 人上限已删除）
 NODE_MAJOR="${NODE_MAJOR:-22}"
 SKIP_DEPS="${SKIP_DEPS:-0}"
 USE_SYSTEMD="${USE_SYSTEMD:-auto}"
@@ -66,7 +66,7 @@ ${C_B}des11 WebDesktop 一键部署脚本${C_0}
   --admin-user <账号>       后台账号（默认 admin）
   --admin-password <密码>   后台密码（默认随机生成并打印）
   --admin-path <路径>       后台入口路径（默认随机生成）
-  --max-sessions <N>        ★ 允许同时在线的人数，默认 3（1 = 旧的单人模式）
+  --max-sessions <N>        ★ 同时在线人数，0 = 不限制（默认）；1 = 旧的单人模式
   --node-major <版本>       需要的 Node 主版本（默认 22）
   --skip-deps               跳过系统依赖安装（已自备 node/git/psql 时使用）
   --no-systemd              不注册 systemd，使用 nohup 后台运行
@@ -103,8 +103,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || die "端口无效：$PORT"
-[[ "$DESKTOP_MAX_SESSIONS" =~ ^[0-9]+$ ]] && (( DESKTOP_MAX_SESSIONS >= 1 && DESKTOP_MAX_SESSIONS <= 50 )) \
-  || die "--max-sessions 需为 1~50 的整数（当前：$DESKTOP_MAX_SESSIONS）"
+[[ "$DESKTOP_MAX_SESSIONS" =~ ^[0-9]+$ ]] && (( DESKTOP_MAX_SESSIONS >= 0 && DESKTOP_MAX_SESSIONS <= 1000 )) \
+  || die "--max-sessions 需为 0~1000 的整数，0 = 不限制（当前：$DESKTOP_MAX_SESSIONS）"
+if [[ "$DESKTOP_MAX_SESSIONS" == "0" ]]; then SEAT_LABEL="不限制（所有人可同时在线）"; else SEAT_LABEL="最多 ${DESKTOP_MAX_SESSIONS} 人（超出时最早登录者自动下线）"; fi
 
 # ----------------------------- 环境探测 -------------------------------------
 IS_ROOT=0; [[ "$(id -u)" == "0" ]] && IS_ROOT=1
@@ -381,7 +382,7 @@ UPDATE_RESTART=0
 UPDATE_INTERVAL_MIN=10
 EOF
   chmod 600 "$envf"
-  ok "环境配置完成（并发在线上限 = ${DESKTOP_MAX_SESSIONS}）"
+  ok "环境配置完成（在线人数上限 = ${SEAT_LABEL}）"
 }
 
 # ----------------------------- 5. 构建 --------------------------------------
@@ -466,7 +467,7 @@ health_check() {
 # ----------------------------- 主流程 ---------------------------------------
 echo
 printf '%s\n' "${C_B}=========================================================${C_0}"
-printf '%s\n' "${C_B}  des11 WebDesktop 一键部署  |  同时在线人数上限: ${DESKTOP_MAX_SESSIONS}${C_0}"
+printf '%s\n' "${C_B}  des11 WebDesktop 一键部署  |  同时在线人数: ${SEAT_LABEL}${C_0}"
 printf '%s\n' "${C_B}=========================================================${C_0}"
 echo
 
@@ -492,7 +493,7 @@ echo "  后台地址    : http://${IP}:${PORT}/$(env_get ADMIN_PATH)"
 echo "  后台账号    : ${ADMIN_USER}"
 echo "  后台密码    : $(env_get ADMIN_PASSWORD)"
 echo "  桌面密码    : $(env_get DESKTOP_PASSWORD)"
-echo "  同时在线    : 最多 ${DESKTOP_MAX_SESSIONS} 人（超出时最早登录者自动下线）"
+echo "  同时在线    : ${SEAT_LABEL}"
 echo
 if [[ "$USE_SYSTEMD" == "yes" ]]; then
   echo "  查看状态    : systemctl status ${SERVICE_NAME}"
@@ -503,6 +504,6 @@ else
   echo "  停止服务    : kill \$(cat ${PID_FILE})"
 fi
 echo "  更新升级    : bash ${APP_DIR}/scripts/deploy.sh --update"
-echo "  改并发人数  : bash ${APP_DIR}/scripts/deploy.sh --max-sessions 5"
+echo "  改并发人数  : bash ${APP_DIR}/scripts/deploy.sh --max-sessions 3"
 echo
 warn "请尽快登录后台修改默认密码，并通过防火墙/反向代理限制访问来源。"

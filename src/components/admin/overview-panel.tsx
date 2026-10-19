@@ -121,7 +121,7 @@ export default function OverviewPanel({ api, seats }: { api: Api; seats?: { onli
             <span className="text-sm font-normal text-slate-500"> 进程</span>
           </div>
           <div className="mt-1 text-[11px] text-slate-500">
-            在线席位 {seats ? `${seats.online}/${seats.max}` : "—"} · 已运行 {s ? fmtUptime(s.uptime) : "—"}
+            在线席位 {seats ? `${seats.online}/${seats.max > 0 ? seats.max : "不限"}` : "—"} · 已运行 {s ? fmtUptime(s.uptime) : "—"}
           </div>
         </div>
       </div>

@@ -22,11 +22,29 @@ export const ADMIN_MAX_AGE = 12 * 3600;
  * 旧版本只保存一个 desk_active，后登录的人会把先登录的人顶下线。
  * 现在允许多人同时在线，默认 3 个；可用环境变量 DESKTOP_MAX_SESSIONS 调整（1 ~ 50）。
  */
+/**
+ * 桌面并发在线人数上限。**0 = 不限制（默认）**。
+ * 上游版本硬编码了「最多 3 人同时在线」，超过就把最早登录的人踢下线；
+ * 现已删除该限制：不再按席位淘汰，任何数量的访问密码登录都可以同时在线。
+ * 需要重新收紧时，设置 DESKTOP_MAX_SESSIONS=1（单人独占）或任意正整数。
+ */
 export const DESKTOP_MAX_SESSIONS = (() => {
-  const raw = Number.parseInt(String(process.env.DESKTOP_MAX_SESSIONS ?? "3"), 10);
-  if (!Number.isFinite(raw)) return 3;
-  return Math.min(50, Math.max(1, raw));
+  const raw = String(process.env.DESKTOP_MAX_SESSIONS ?? "0").trim().toLowerCase();
+  if (raw === "" || raw === "0" || raw === "-1" || raw === "unlimited" || raw === "none" || raw === "off") return 0;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(1000, n);
 })();
+
+/** true = 不限制同时在线人数（默认） */
+export const DESKTOP_UNLIMITED = DESKTOP_MAX_SESSIONS <= 0;
+
+/**
+ * 同一个浏览器 Cookie 里最多串联多少个令牌。
+ * 服务端席位已不限制，这里单独设一个上限只是因为浏览器对单个 Cookie 有 4KB 限制；
+ * 一个令牌约 170 字节，8 个约 1.4KB，远低于 4096，安全。
+ */
+const COOKIE_MAX_TOKENS = 8;
 
 export const DEFAULT_ADMIN_USER = process.env.ADMIN_USER || "admin";
 const INITIAL_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin@Des11#2026";
@@ -461,7 +479,8 @@ export async function createDesktopToken(password: string) {
     const current = normalizeActiveSessions(parseActiveSessions(config.get(ACTIVE_KEY)), now)
       .filter((s) => isAlive(s, now));
     current.push({ sid: sessionId, at: now, exp: expiry, seen: now });
-    const kept = current.slice(-DESKTOP_MAX_SESSIONS);
+    // 默认不限制人数：不淘汰任何人；只有显式配置了 DESKTOP_MAX_SESSIONS>0 才按 FIFO 淘汰。
+    const kept = DESKTOP_UNLIMITED ? current : current.slice(-DESKTOP_MAX_SESSIONS);
     const evicted = current.length - kept.length;
     const value = JSON.stringify(kept);
     await tx
@@ -495,14 +514,14 @@ export function splitDesktopCookie(raw?: string | null): string[] {
     .split(COOKIE_SEP)
     .map((part) => part.trim())
     .filter((part) => part.length > 0 && part.length <= 2000)
-    .slice(-DESKTOP_MAX_SESSIONS);
+    .slice(-COOKIE_MAX_TOKENS);
 }
 
-/** 登录成功后把新令牌并入原有 Cookie（超出上限丢弃最旧的） */
+/** 登录成功后把新令牌并入原有 Cookie（超出 Cookie 容量上限时丢弃最旧的） */
 export function mergeDesktopCookie(raw: string | null | undefined, token: string) {
   const list = splitDesktopCookie(raw).filter((t) => t !== token);
   list.push(token);
-  return list.slice(-DESKTOP_MAX_SESSIONS).join(COOKIE_SEP);
+  return list.slice(-COOKIE_MAX_TOKENS).join(COOKIE_SEP);
 }
 
 /** 退出登录时只摘掉自己那一个令牌，同浏览器其他标签页仍然有效 */
@@ -554,7 +573,11 @@ export async function denyDesktop(req: Request): Promise<Response | null> {
     return Response.json({ error: "服务暂时不可用，请稍后重试" }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
   return Response.json(
-    { error: `登录已过期，或在线人数已满（最多 ${DESKTOP_MAX_SESSIONS} 人同时在线）被挤下线，请重新输入密码` },
+    {
+      error: DESKTOP_UNLIMITED
+        ? "登录已过期（可能被管理员强制下线，或访问密码已变更），请重新输入密码"
+        : `登录已过期，或在线人数已满（最多 ${DESKTOP_MAX_SESSIONS} 人同时在线）被挤下线，请重新输入密码`,
+    },
     { status: 401, headers: { "Cache-Control": "no-store" } },
   );
 }
