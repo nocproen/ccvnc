@@ -2,6 +2,7 @@ import { denyDesktop } from "@/lib/auth";
 import {
   getGui,
   setClipboardFilesForSession,
+  setClipboardTextForSession,
   setClipboardUploadedFile,
   triggerVncPaste,
 } from "@/lib/gui";
@@ -28,6 +29,7 @@ export async function POST(req: Request, ctx: Ctx) {
   if (ct === "application/json") {
     const b = (await req.json().catch(() => null)) as {
       paths?: unknown;
+      text?: unknown;
       cut?: unknown;
       triggerPaste?: unknown;
       x?: unknown;
@@ -35,6 +37,12 @@ export async function POST(req: Request, ctx: Ctx) {
     } | null;
     if (!b) return Response.json({ error: "参数无效" }, { status: 400 });
     try {
+      // 纯文本：由服务器直接写入该会话的 X 剪贴板（UTF-8 无损）。
+      // 不能走 RFB 的 ClientCutText —— 它只支持 ISO-8859-1，中文会变成「?」。
+      if (typeof b.text === "string" && b.text.length > 0) {
+        const clip = await setClipboardTextForSession(g, b.text.slice(0, 1_000_000), !!b.triggerPaste);
+        return Response.json({ ok: true, clip });
+      }
       const rawPaths = Array.isArray(b.paths)
         ? b.paths.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
         : [];

@@ -16,6 +16,7 @@ import {
   recordSuccess,
   remainingAttempts,
   requireAdmin,
+  revokeAdminSession,
   setCookieHeader,
   setDesktopExpiry,
   setDesktopPassword,
@@ -80,6 +81,8 @@ async function handle(req: Request, ctx: Ctx, method: "GET" | "POST") {
 
   if (action === "logout" && method === "POST") {
     if (!(await requireAdmin(req))) return json({ error: "会话已经失效" }, 401);
+    // 只注销自己这一个会话：同账号在其他浏览器的登录不受影响
+    await revokeAdminSession(req).catch(() => {});
     return json({ ok: true }, 200, { "Set-Cookie": clearCookieHeader(ADMIN_COOKIE, req) });
   }
 

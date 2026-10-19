@@ -5,34 +5,28 @@ import fsp from "fs/promises";
 // 优先级：系统 vncpasswd -f（TigerVNC 自带，最权威）→ openssl CLI（legacy provider 的 DES-ECB）。
 // 不用 Node crypto DES：Node ≥17 在 OpenSSL 3 下默认禁用 DES，运行时必须 --openssl-legacy-provider，不现实。
 
-const VNC_KEY = Buffer.from([0x2a, 0x79, 0x6a, 0x6c, 0x65, 0x79, 0x65, 0x77]); // VNC 固定 DES key
+// VNC 固定 DES 密钥。注意 VNC 著名的「位反转」约定只体现在这个魔数里：
+// 标准 vncpasswd 用原始密钥 {23,82,107,6,35,78,88,7}，其 DES 实现在生成子密钥时会逐字节
+// 位反转，等效于直接用下面这个 key 做标准 DES —— 密码与密文都【不再】做任何位反转。
+// 旧实现对明文和密文又各做了一次位反转、且魔数本身也不对，写出的 passwd 文件
+// tigervncserver 根本不认（后台改完 VNC 密码后必然登录失败），这里按权威算法修正。
+const VNC_KEY_HEX = "e84ad660c4721ae0";
 
-function bitrevBytes(buf: Buffer): Buffer {
-  const out = Buffer.alloc(buf.length);
-  for (let i = 0; i < buf.length; i++) {
-    let v = 0;
-    for (let j = 0; j < 8; j++) v |= ((buf[i] >> j) & 1) << (7 - j);
-    out[i] = v;
-  }
-  return out;
-}
-
-// VNC 密码文件 = bitrev( DES_ECB( bitrev(明文补零到8), bitrev(key) ) )
+// VNC 密码文件 = DES_ECB(明文补零到 8 字节, VNC 固定密钥)，密文原样写入
 function opensslVncEncrypt(pw: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const plain = Buffer.alloc(8);
     Buffer.from(pw, "ascii").copy(plain);
-    const keyHex = bitrevBytes(VNC_KEY).toString("hex");
     const child = execFile(
       "openssl",
-      ["des-ecb", "-provider", "legacy", "-provider", "default", "-K", keyHex, "-nopad"],
+      ["des-ecb", "-provider", "legacy", "-provider", "default", "-K", VNC_KEY_HEX, "-nopad"],
       { encoding: "buffer" as never, maxBuffer: 64 * 1024 },
       (err, stdout) => {
         if (err || !stdout || stdout.length !== 8) return reject(err ?? new Error("openssl 输出异常"));
-        resolve(bitrevBytes(stdout));
+        resolve(stdout);
       },
     );
-    child.stdin?.end(bitrevBytes(plain));
+    child.stdin?.end(plain);
   });
 }
 

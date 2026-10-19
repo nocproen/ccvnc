@@ -350,11 +350,16 @@ function parseActiveSessions(raw: string | null | undefined): ActiveDesktopSessi
         if (!sid || sid.length > 128) continue;
         const at = Number(row.at);
         const exp = Number(row.exp);
+        // 必须把上次心跳时间读回来！旧代码在这里把 seen 硬编码成 0，
+        // 于是所有会话都被当成「从没打过心跳」，isAlive 只能按登录时间算 2 分钟存活期：
+        // 任何人新登录（createDesktopToken 按 isAlive 过滤列表）都会把登录超过 2 分钟的人
+        // 从在线列表里删掉 → 对方下一次请求就 401 被踢下线（“别人一登录我就掉线”）。
+        const seen = Number(row.seen);
         out.push({
           sid,
           at: Number.isFinite(at) ? at : 0,
           exp: Number.isFinite(exp) ? exp : 0,
-          seen: 0,
+          seen: Number.isFinite(seen) && seen > 0 ? seen : 0,
         });
       }
       return out;
@@ -612,12 +617,56 @@ export async function findAdminByName(name: string) {
   return u as AdminUser | undefined;
 }
 
+/* 管理员在线会话：和桌面一样用列表保存，同一账号在多处登录互不影响。
+   旧实现只存一个 sid，后登录的人会把先登录的管理员直接顶下线。 */
+type AdminSession = { sid: string; exp: number };
+const ADMIN_MAX_SESSIONS_PER_USER = 16;
+
+function parseAdminSessions(raw: string | null | undefined): AdminSession[] {
+  const text = (raw ?? "").trim();
+  if (!text) return [];
+  if (text.startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (!Array.isArray(parsed)) return [];
+      const out: AdminSession[] = [];
+      for (const item of parsed) {
+        if (!item || typeof item !== "object") continue;
+        const row = item as Record<string, unknown>;
+        const sid = typeof row.sid === "string" ? row.sid : "";
+        const exp = Number(row.exp);
+        if (sid && sid.length <= 128 && Number.isFinite(exp)) out.push({ sid, exp });
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+  // 旧格式：单个 sid 字符串（升级前已登录的管理员不被踢下线）
+  return [{ sid: text, exp: Date.now() + ADMIN_MAX_AGE * 1000 }];
+}
+
 export async function createAdminToken(u: AdminUser) {
   const sessionId = crypto.randomBytes(24).toString("base64url");
+  const exp = Date.now() + ADMIN_MAX_AGE * 1000;
   const key = `admin_active_${u.id}`;
-  await setCfg(key, sessionId);
+  // 咨询锁内读-改-写，避免两个并发登录互相覆盖、把对方刚拿到的会话冲掉
+  await ensureAuthTables();
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(28411, 7)`);
+    const [row] = await tx.select().from(authConfig).where(eq(authConfig.key, key));
+    const now = Date.now();
+    const list = parseAdminSessions(row?.value).filter((s) => s.exp > now && s.sid !== sessionId);
+    list.push({ sid: sessionId, exp });
+    const value = JSON.stringify(list.slice(-ADMIN_MAX_SESSIONS_PER_USER));
+    await tx
+      .insert(authConfig)
+      .values({ key, value })
+      .onConflictDoUpdate({ target: authConfig.key, set: { value } });
+  });
+  S.cache.delete(key);
   return {
-    token: await sign({ k: "a", exp: Date.now() + ADMIN_MAX_AGE * 1000, uid: u.id, fp: fp(u.passwordHash), sid: sessionId }),
+    token: await sign({ k: "a", exp, uid: u.id, fp: fp(u.passwordHash), sid: sessionId }),
     sessionId,
   };
 }
@@ -631,7 +680,29 @@ export async function verifyAdminToken(token?: string | null, sessionId?: string
   await ensureAuthTables();
   const [u] = await db.select().from(adminUsers).where(eq(adminUsers.id, p.uid));
   if (!u || fp(u.passwordHash) !== p.fp) return null;
-  return (await getCfg(`admin_active_${u.id}`, 0)) === sid ? u : null;
+  const now = Date.now();
+  const list = parseAdminSessions(await getCfg(`admin_active_${u.id}`, 0));
+  return list.some((s) => s.sid === sid && s.exp > now) ? u : null;
+}
+
+/** 管理员退出登录：只注销自己这一个会话，不影响同账号在其他浏览器的登录 */
+export async function revokeAdminSession(req: Request) {
+  const token = cookieValue(req.headers.get("cookie"), ADMIN_COOKIE);
+  const p = await unsign<{ k: string; exp: number; uid: number; sid?: string }>(token).catch(() => null);
+  const sid = req.headers.get("x-admin-session") || p?.sid;
+  if (!p || p.k !== "a" || !sid) return;
+  const key = `admin_active_${p.uid}`;
+  await ensureAuthTables();
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(28411, 7)`);
+    const [row] = await tx.select().from(authConfig).where(eq(authConfig.key, key));
+    const value = JSON.stringify(parseAdminSessions(row?.value).filter((s) => s.sid !== sid));
+    await tx
+      .insert(authConfig)
+      .values({ key, value })
+      .onConflictDoUpdate({ target: authConfig.key, set: { value } });
+  });
+  S.cache.delete(key);
 }
 
 export async function requireAdmin(req: Request) {

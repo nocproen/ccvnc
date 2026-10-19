@@ -6,6 +6,8 @@ unset XKL_XMODMAP
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 [ -r "$HOME/.Xresources" ] && xrdb "$HOME/.Xresources"
+# 剪贴板管理器：没有它时，在 XFCE 里复制后关掉原应用窗口，剪贴板内容会随之消失
+command -v xfce4-clipman >/dev/null 2>&1 && (xfce4-clipman >/dev/null 2>&1 &)
 exec startxfce4
 `;
 

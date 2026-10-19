@@ -1188,6 +1188,17 @@ export async function readVncClipboard(): Promise<ServerClip | null> {
                 ts: Date.now(),
               });
             }
+            // 纯文本也要返回：以前这里直接丢弃，网页端只能退回 RFB 事件里
+            // 被 ISO-8859-1 损坏过的文本（中文全是「?」），取回本机必然乱码。
+            if (parsed.kind === "text" && parsed.text) {
+              return resolve({
+                kind: "text",
+                paths: [],
+                cut: false,
+                text: parsed.text,
+                ts: Date.now(),
+              });
+            }
           } catch {
             /* ignore */
           }
@@ -1210,6 +1221,30 @@ export async function setClipboardFilesForSession(
   triggerPaste = false,
 ): Promise<ServerClip> {
   const clip = await prepareClipPayload(paths, cut);
+  G.clip = clip;
+  await applyClipToDisplay(g.display, clip);
+  if (triggerPaste) {
+    await sleep(60);
+    await runXdo(g.display, ["key", "--clearmodifiers", "ctrl+v"]);
+  }
+  return clip;
+}
+
+/**
+ * 把一段文本写进指定 VNC 会话的 X 剪贴板（可选立即发送 Ctrl+V）。
+ * 这是绕开 RFB 剪贴板的 Unicode 通道：RFB 基础剪贴板（ClientCutText）只支持 ISO-8859-1，
+ * 而 TigerVNC 1.12（Debian 12 自带版本）不支持扩展剪贴板协议 —— noVNC 的
+ * clipboardPasteFrom() 会把所有中文字符替换成「?」再发出去，粘贴必然乱码。
+ * 经服务器上的 wd-clip.py 以 UTF8_STRING 等目标直接写入 X 剪贴板则完整无损。
+ */
+export async function setClipboardTextForSession(
+  g: { display: number },
+  text: string,
+  triggerPaste = false,
+): Promise<ServerClip> {
+  if (!text) throw new Error("文本为空");
+  if ((g.display ?? -1) < 0) throw new Error("该会话的剪贴板无法由服务器代写（外部 VNC 不在本机）");
+  const clip: ServerClip = { kind: "text", paths: [], cut: false, text, ts: Date.now() };
   G.clip = clip;
   await applyClipToDisplay(g.display, clip);
   if (triggerPaste) {

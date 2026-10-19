@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { desktopClipIsFresher } from "../clip-priority";
+import { writeTextToLocal } from "../desktop-clip";
 import { useDialogs } from "../dialogs";
 import { SYS_DRAG_KEY, baseName, readStoredSysClip, useSys } from "../sys-store";
 import { useWm, type Win } from "../wm-store";
@@ -766,6 +767,22 @@ export function GuiApp({ win }: { win: Win }) {
           text = null; // 没权限 / 非安全上下文：当本机剪贴板不可用
         }
         if (text) {
+          // 优先让服务器把文本直接写入远程 X 剪贴板（UTF-8 无损）再触发粘贴。
+          // RFB 基础剪贴板只支持 ISO-8859-1：中文经 clipboardPasteFrom 会全部变成「?」，
+          // 这是「本地复制的中文粘不进 VNC」的根源。服务端写入失败（外部 VNC 不在本机等）
+          // 时才回退到 RFB 剪贴板 + 模拟按键。
+          let viaServer = false;
+          try {
+            const res = await fetch(`/api/gui/${sid}/clipboard`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text, triggerPaste: true }),
+            });
+            viaServer = res.ok;
+          } catch {
+            viaServer = false;
+          }
+          if (viaServer) return;
           r.clipboardPasteFrom(text);
           return void setTimeout(press, 50);
         }
@@ -994,12 +1011,31 @@ export function GuiApp({ win }: { win: Win }) {
       text = null;
     }
     if (text) {
-      r.clipboardPasteFrom(text);
-      await fetch(`/api/gui/${sid}/clipboard`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ triggerPaste: true }),
-      }).catch(() => {});
+      // 让服务器把文本写入远程 X 剪贴板并直接触发粘贴（UTF-8 无损，一步到位）。
+      // 旧做法是 clipboardPasteFrom 之后再调 triggerPaste，而服务端 triggerVncPaste 会先把
+      // G.clip（桌面里之前复制的文件等旧内容）重新写回 X 剪贴板再发 Ctrl+V ——
+      // 刚送进去的文本当场被旧内容覆盖，粘出来的不是想要的东西。
+      let viaServer = false;
+      try {
+        const res = await fetch(`/api/gui/${sid}/clipboard`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, triggerPaste: true }),
+        });
+        viaServer = res.ok;
+      } catch {
+        viaServer = false;
+      }
+      if (!viaServer) {
+        // 回退：RFB 剪贴板 + 网页端模拟按键（不再让服务端重放旧剪贴板）
+        r.clipboardPasteFrom(text);
+        setTimeout(() => {
+          r.sendKey(0xffe3, "ControlLeft", true);
+          r.sendKey(0x76, "KeyV", true);
+          r.sendKey(0x76, "KeyV", false);
+          r.sendKey(0xffe3, "ControlLeft", false);
+        }, 50);
+      }
       r.focus();
       dlg.toast("已把本机剪贴板的文字粘贴到当前 VNC 应用");
       return;
@@ -1017,15 +1053,27 @@ export function GuiApp({ win }: { win: Win }) {
 
   // 把 VNC 会话里复制的文本取回本机剪贴板（用户主动触发，不自动覆盖）
   const pullVncClip = async () => {
-    const text = vncClipRef.current || vncClip;
+    // 优先从服务器读远程 X 剪贴板的原文：RFB 的 ServerCutText 只支持 ISO-8859-1，
+    // 中文传到浏览器时已经变成「?」，缓存里的文本取回必然乱码；
+    // 经服务器 wd-clip.py 读 UTF8_STRING 才是无损的。读不到才用事件缓存兜底。
+    let text = "";
+    try {
+      const res = await fetch("/api/gui/clipboard?probe=1", { cache: "no-store" });
+      if (res.ok) {
+        const d = (await res.json()) as { clip?: { kind?: string; text?: string } | null };
+        if (d.clip?.kind === "text" && d.clip.text) text = d.clip.text;
+      }
+    } catch {
+      /* 忽略，走下面的兜底 */
+    }
+    if (!text) text = vncClipRef.current || vncClip;
     if (!text) {
       dlg.toast("VNC 会话里还没有复制过文本");
       return;
     }
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await writeTextToLocal(text)) {
       dlg.toast("已把 VNC 里复制的文本取回本机剪贴板");
-    } catch {
+    } else {
       dlg.toast("取回失败：浏览器拒绝了剪贴板写入权限");
     }
   };
