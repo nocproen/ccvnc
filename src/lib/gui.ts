@@ -441,10 +441,13 @@ function finish(g: Gui, state: "exited" | "failed", note = "") {
   g.endedAt = mono();
   killGroup(g.app);
   setTimeout(() => killGroup(g.xvnc), g.preset ? 1500 : 0);
-  setTimeout(() => {
-    void fsp.rm(`/tmp/.X${g.display}-lock`, { force: true });
-    void fsp.rm(`/tmp/.X11-unix/X${g.display}`, { force: true });
-  }, 2000).unref?.();
+  // 外部 VNC 会话（tigervncserver）的显示器不归我们管：绝不能删它的锁文件 / 套接字
+  if (!g.external && g.display >= 0) {
+    setTimeout(() => {
+      void fsp.rm(`/tmp/.X${g.display}-lock`, { force: true });
+      void fsp.rm(`/tmp/.X11-unix/X${g.display}`, { force: true });
+    }, 2000).unref?.();
+  }
 }
 
 const IGNORE = new Set([
@@ -518,12 +521,12 @@ async function startSession(g: Gui, delayMs = 0) {
     // —— 外部 VNC 会话：不装图形环境、不 spawn Xvnc / openbox，直接检查外部 VNC 服务器是否可达 ——
     if (g.external) {
       g.state = "starting";
-      g.note = `正在连接外部 VNC 桌面（${g.external.host}:${g.external.port}）…`;
+      g.note = "正在连接桌面…";
       if (g.stopped) return;
       const ok = await waitPort(g.external.port, 15_000, () => g.stopped);
       if (g.stopped) return;
       if (!ok) {
-        finish(g, "failed", `外部 VNC 服务不可达（${g.external.host}:${g.external.port}）。请先启动 tigervncserver，例如：tigervncserver :1 -geometry 1600x900`);
+        finish(g, "failed", "远程桌面暂时不可用，请稍后点击「重新连接」");
         return;
       }
       if (!g.stopped) {
@@ -747,7 +750,11 @@ export async function createGui(o: GuiOpts): Promise<{ g: Gui; reused: boolean }
     note: "",
     log: "",
     exitCode: null,
-    display: -1,
+    // 本机 tigervncserver :N 监听 5900+N：映射出显示器号，剪贴板 / 文件互传 / xdotool 才能作用到外部桌面
+    display:
+      isExternal && /^(localhost|127\.0\.0\.1|::1)$/.test(extHost) && extPort > 5900 && extPort < 6000
+        ? extPort - 5900
+        : -1,
     port: 0,
     xvnc: null,
     app: null,
@@ -786,10 +793,13 @@ export function stopGui(id: string, reason = "client") {
   if (g.preset === "browser") G.lastBrowserStop = mono();
   killGroup(g.app);
   setTimeout(() => killGroup(g.xvnc), g.preset ? 1500 : 0);
-  setTimeout(() => {
-    void fsp.rm(`/tmp/.X${g.display}-lock`, { force: true });
-    void fsp.rm(`/tmp/.X11-unix/X${g.display}`, { force: true });
-  }, 2000).unref?.();
+  // 外部 VNC 会话（tigervncserver）的显示器不归我们管：绝不能删它的锁文件 / 套接字
+  if (!g.external && g.display >= 0) {
+    setTimeout(() => {
+      void fsp.rm(`/tmp/.X${g.display}-lock`, { force: true });
+      void fsp.rm(`/tmp/.X11-unix/X${g.display}`, { force: true });
+    }, 2000).unref?.();
+  }
 }
 
 /** 会话为什么不存在了（client=网页关闭/刷新/点了重新启动，idle=断线太久被回收，auth-expired=登录失效，replaced=被同名新窗口替换） */
@@ -1293,4 +1303,48 @@ export async function dropFile(g: { display: number }, file: string, x: number, 
   await sleep(150);
   await runXdo(g.display, ["key", "--clearmodifiers", "ctrl+v"]);
   return { path: file, kind: clip.kind };
+}
+
+/** 读取指定显示器（如 tigervncserver :1）的 X 剪贴板：文件管理器里复制的文件 / 图片 / 文本 */
+export async function readClipOfDisplay(display: number): Promise<{ kind: string; paths: string[]; text: string } | null> {
+  if (display < 0) return null;
+  const binDir = await ensureBin();
+  const env = await guiEnv(display, binDir);
+  const viaScript = await new Promise<{ kind: string; paths: string[]; text: string } | null>((resolve) => {
+    execFile("python3", [path.join(binDir, "wd-clip.py"), "--get"], { env, timeout: 3000 }, (err, stdout) => {
+      if (err || !stdout) return resolve(null);
+      try {
+        const p = JSON.parse(String(stdout).trim()) as { kind?: string; paths?: string[]; pngPath?: string; text?: string };
+        if (p.kind === "files" && p.paths?.length) return resolve({ kind: "files", paths: p.paths, text: "" });
+        if (p.kind === "image" && p.pngPath) return resolve({ kind: "image", paths: [p.pngPath], text: "" });
+        if (p.text) return resolve({ kind: "text", paths: [], text: p.text });
+      } catch {
+        /* ignore */
+      }
+      resolve(null);
+    });
+  });
+  if (viaScript) return viaScript;
+  // 兜底：xclip 读 uri-list / 纯文本
+  const xget = (target?: string) =>
+    new Promise<string>((resolve) => {
+      const args = ["-selection", "clipboard", "-o", ...(target ? ["-t", target] : [])];
+      execFile("xclip", args, { env, timeout: 2000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? "" : String(stdout ?? "")));
+    });
+  const uris = await xget("text/uri-list");
+  const paths = uris
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("file://"))
+    .map((l) => {
+      try {
+        return decodeURIComponent(new URL(l).pathname);
+      } catch {
+        return "";
+      }
+    })
+    .filter(Boolean);
+  if (paths.length) return { kind: "files", paths, text: "" };
+  const text = await xget();
+  return text ? { kind: "text", paths: [], text } : null;
 }

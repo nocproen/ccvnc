@@ -1240,11 +1240,8 @@ export function GuiApp({ win }: { win: Win }) {
                 setRunKey((k) => k + 1); // 重建整个连接流程（会话会被复用）
               }}
             >
-              <div className="mb-1 text-sm font-medium text-slate-200">输入外部 VNC 桌面的密码</div>
-              <div className="mb-3 text-xs leading-relaxed text-slate-400">
-                这是 tigervncserver 的 VNC 密码（<code className="text-slate-300">vncpasswd</code>{" "}
-                设置的），不是本桌面的登录密码。密码仅保存在本机浏览器。
-              </div>
+              <div className="mb-1 text-sm font-medium text-slate-200">输入远程桌面密码</div>
+              
               <input
                 autoFocus
                 type="password"
