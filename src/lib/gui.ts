@@ -567,11 +567,16 @@ async function startSession(g: Gui, delayMs = 0) {
         "None",
         "-localhost",
         "-AlwaysShared",
+        "-DisconnectClients",
+        "0",
         // —— 远程画面稳定性 / 延迟优化 ——
-        // 默认 60fps 会在高延迟链路上持续灌满带宽：画面排队积压，用户感受到的就是「延迟很高」。
-        // 30fps 对桌面应用完全够用，且把瞬时码率减半，排队时间随之减半。
+        // 300ms+ 链路上 30fps 仍会把带宽灌满，首屏传不完就被看门狗重连，表现为黑屏循环。
+        // 8fps 对远程桌面够用，且和网页端的低画质档配套。
         "-FrameRate",
-        "30",
+        "8",
+        // 禁止客户端把分辨率改成浏览器视口（经常是 1920 甚至 4K）。
+        "-AcceptSetDesktopSize",
+        "0",
         // 强制逐像素比对帧缓冲：只发真正变化的区域。
         // 默认 "auto" 在负载高时会关掉比对，于是大量「内容没变但被标记为脏」的区域被反复重发——
         // 这正是画面「闪烁」的主要来源。固定为 1（始终比对）用一点 CPU 换掉绝大部分无效重绘。
@@ -744,8 +749,9 @@ export async function createGui(o: GuiOpts): Promise<{ g: Gui; reused: boolean }
     name: (name || exec.split(/\s+/)[0].split("/").pop() || "应用").slice(0, 80),
     exec,
     cwd,
-    w: clamp(o.w, 320, 4000, 1024),
-    h: clamp(o.h, 240, 4000, 640),
+    // 上限锁在 1024x576：更大的帧缓冲在 300ms+ 延迟下首屏经常传不完，触发黑屏重连。
+    w: clamp(o.w, 320, 1024, 1024),
+    h: clamp(o.h, 240, 576, 576),
     state: "preparing",
     note: "",
     log: "",
@@ -831,26 +837,32 @@ export function guiUpgrade(wss: WebSocketServer, req: http.IncomingMessage, sock
     socket.destroy();
     return;
   }
-  wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-    (socket as net.Socket).setNoDelay?.(true);
+    wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+    const sock = socket as net.Socket;
+    sock.setNoDelay?.(true);
+    sock.setKeepAlive?.(true, 10_000);
+    sock.setTimeout?.(0);
     // 外部 VNC 会话：桥接到用户自己的 tigervncserver（默认 localhost:5901）；否则桥接到自管 Xvnc
     const tcp = net.connect({ host: g.external?.host ?? "localhost", port: g.external?.port ?? g.port });
     tcp.setNoDelay(true);
+    tcp.setKeepAlive(true, 10_000);
+    tcp.setTimeout(0);
     g.clients++;
     g.lastSeen = mono();
     let gone = false;
+    let lastTraffic = Date.now();
     const ip = String(req.headers["x-forwarded-for"] ?? req.socket.remoteAddress ?? "?").split(",")[0].trim();
     console.log(`${stamp()} [gui] ws open ${g.id} clients=${g.clients} ip=${ip}`);
 
     // 心跳有两个作用：
-    //  1) 保活。画面静止时 VNC 一个字节都不发，而多数网关/反代会掐掉空闲 30–60 秒的连接。
-    //     原来 25 秒一次的间隔在抖动下已经压线，连接被掐断 → 网页重连 → 画面重新传一屏 = 用户看到的「周期性闪烁 / 重连」。
-    //     改成 10 秒，稳稳压在常见的 30 秒空闲阈值之下。
-    //  2) 实测往返延迟（RTT），网页端据此自动调画质，这样「延迟高」时不会继续用高码率把链路撑爆。
+    //  1) 保活。画面静止时 VNC 一个字节都不发，网关会掐掉空闲连接，网页重连后又要重传整屏 = 黑屏。
+    //  2) 实测往返延迟（RTT），网页端据此把 300ms+ 链路锁在最低画质。
+    // 高延迟链路上 pong 可能排在大帧后面，不能单凭 ping 超时就拆连接。
     let missed = 0;
     let pingAt = 0;
     ws.on("pong", () => {
       missed = 0;
+      lastTraffic = Date.now();
       if (!pingAt) return;
       const sample = Date.now() - pingAt;
       pingAt = 0;
@@ -859,16 +871,23 @@ export function guiUpgrade(wss: WebSocketServer, req: http.IncomingMessage, sock
     });
     const pingTimer = setInterval(() => {
       if (ws.readyState !== ws.OPEN) return;
-      // 6 次（约 60 秒）都没有任何回应才判定对端已死。
-      // 原来 3 次 × 25 秒的组合里，单次网络抖动就可能凑够次数被误杀，导致毫无必要的重连。
-      if (++missed > 6) {
-        ws.terminate();
-        cleanup("ping-timeout");
-        return;
+      // 约 96 秒无响应才考虑断开；若 VNC 数据还在流动，说明只是 ping 被堵在大帧后面，不能重连。
+      if (++missed > 12) {
+        if (Date.now() - lastTraffic < 25_000) {
+          missed = 4;
+        } else {
+          ws.terminate();
+          cleanup("ping-timeout");
+          return;
+        }
       }
       pingAt = Date.now();
-      ws.ping();
-    }, 10_000);
+      try {
+        ws.ping();
+      } catch {
+        /* ignore */
+      }
+    }, 8_000);
 
     const cleanup = (why = "?") => {
       if (gone) return;
@@ -905,8 +924,10 @@ export function guiUpgrade(wss: WebSocketServer, req: http.IncomingMessage, sock
     // 用户的每一次点击都要等这堆旧帧传完才看得到反应 —— 这就是「延迟太高」的真正来源。
     // 把水位压到 256KB：一旦超过就停止从 Xvnc 读数据，Xvnc 的待发更新会自动合并
     //（VNC 是状态式协议，中间帧被合并掉完全无损），恢复读取时直接拿到「最新」的画面而不是一串过期帧。
-    const HI = 256 * 1024;
-    const LO = 64 * 1024;
+    // 300ms+ 链路上 256KB 积压大约是 1–2 秒的陈旧画面，点击要等它传完。
+    // 压到 64KB：超出就暂停读取，TigerVNC 会把中间帧合并掉，恢复时直接发最新画面。
+    const HI = 64 * 1024;
+    const LO = 16 * 1024;
     let draining = false;
     const drain = () => {
       if (ws.bufferedAmount < LO || ws.readyState !== ws.OPEN || gone) {
@@ -914,9 +935,10 @@ export function guiUpgrade(wss: WebSocketServer, req: http.IncomingMessage, sock
         if (!gone) tcp.resume();
         return;
       }
-      setTimeout(drain, 15);
+      setTimeout(drain, 40);
     };
     tcp.on("data", (d) => {
+      lastTraffic = Date.now();
       if (ws.readyState !== ws.OPEN) return;
       ws.send(d, { binary: true });
       // 加 draining 守卫：原来每个 data 事件都会再起一个定时器，积压时会叠出几十个计时器互相抢着 resume
@@ -931,6 +953,7 @@ export function guiUpgrade(wss: WebSocketServer, req: http.IncomingMessage, sock
     tcp.on("error", () => cleanup("xvnc-error"));
     let ctrlDown = false;
     ws.on("message", (d) => {
+      lastTraffic = Date.now();
       g.lastSeen = mono();
       ctrlDown = logImeKeys(g.id, rawToBuffer(d), ctrlDown);
       if (tcp.writable) tcp.write(rawToBuffer(d));

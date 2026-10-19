@@ -94,7 +94,7 @@ export default function VncPanel({ api }: { api: Api }) {
         {!running && (
           <div className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs text-amber-200">
             未检测到运行中的 VNC 服务。点下方「重启 VNC 服务」可直接拉起（
-            <code className="text-amber-100">tigervncserver :1 -geometry 1600x900 -AlwaysShared</code>
+            <code className="text-amber-100">tigervncserver :1 -geometry 1024x576 -FrameRate 8 -AcceptSetDesktopSize 0</code>
             ），否则请先在服务器上自行启动。
           </div>
         )}

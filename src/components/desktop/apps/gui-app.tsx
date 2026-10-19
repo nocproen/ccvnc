@@ -72,20 +72,28 @@ const Q_IDLE_MS = 500;
 // 链路越差就主动把码率降下来，宁可稍微糊一点也要跟手；链路好时自动回到高画质。
 type Tier = { q: number; c: number; label: string };
 const TIERS: Tier[] = [
-  { q: 8, c: 1, label: "极佳" }, // 本机 / 局域网：几乎不压缩，CPU 换清晰度
-  { q: 7, c: 2, label: "良好" },
-  { q: 5, c: 4, label: "一般" },
-  { q: 3, c: 6, label: "较差" },
-  { q: 2, c: 9, label: "很差" }, // 高延迟 / 窄带：最大压缩，优先保证响应
+  { q: 5, c: 3, label: "极佳" },
+  { q: 3, c: 5, label: "良好" },
+  { q: 2, c: 7, label: "一般" },
+  { q: 1, c: 8, label: "较差" },
+  { q: 0, c: 9, label: "高延迟" }, // 300ms+：最低 JPEG + 最大压缩，优先把首屏传完
 ];
 
+function isSlowLink(rtt: number) {
+  return rtt <= 0 || rtt >= 180;
+}
 
-/** 根据 RTT 和积压次数挑一个画质档位 */
+/** 根据 RTT 和积压次数挑一个画质档位。未知延迟按 300ms+ 处理，避免首屏用大图堵死链路。 */
 function pickTier(rtt: number, stalls: number): Tier {
-  let i = rtt <= 0 ? 1 : rtt < 30 ? 0 : rtt < 90 ? 1 : rtt < 200 ? 2 : rtt < 400 ? 3 : 4;
-  // 出现过发送积压 = 带宽不够（跟延迟无关），每累计几次就再降一档
-  if (stalls > 0) i = Math.min(TIERS.length - 1, i + Math.min(2, Math.ceil(stalls / 3)));
+  let i = rtt <= 0 ? 4 : rtt < 40 ? 0 : rtt < 90 ? 1 : rtt < 160 ? 2 : rtt < 250 ? 3 : 4;
+  if (stalls > 0) i = Math.min(TIERS.length - 1, i + Math.min(2, Math.ceil(stalls / 2)));
   return TIERS[i];
+}
+
+function capDim(n: number, max: number, fallback: number) {
+  const v = Math.round(n);
+  if (!Number.isFinite(v) || v <= 0) return fallback;
+  return Math.max(320, Math.min(max, v));
 }
 
 // 服务器明确告知"这个会话已经不存在了"（附带原因）
@@ -420,9 +428,13 @@ export function GuiApp({ win }: { win: Win }) {
       host.dataset.quality = String(q);
     };
 
-    // 当前链路档位（由下面的探测器按实测 RTT 更新）
-    let tier = TIERS[1];
+    // 连上之前还不知道 RTT：从最低画质起步，避免 300ms+ 链路上先灌一屏高清图。
+    let tier = TIERS[TIERS.length - 1];
     const applyTier = (r: Rfb, t: Tier) => {
+      const next = TIERS.indexOf(t);
+      const cur = TIERS.indexOf(tier);
+      // 刚连上的 20 秒内只允许降画质，不升。升画质会触发整屏重传，高延迟下又会黑一阵。
+      if (next < cur && Date.now() - connectedAt < 20_000) return;
       tier = t;
       if (r.compressionLevel !== t.c) r.compressionLevel = t.c;
       if (forcedQ === null) setQuality(r, t.q);
@@ -514,8 +526,10 @@ export function GuiApp({ win }: { win: Win }) {
       const screen = host.firstElementChild as HTMLElement | null; // noVNC 的画面容器（里面是画布）
       rfb = r;
       rfbRef.current = r;
-      r.scaleViewport = false;
-      r.resizeSession = true; // 窗口大小变化时，让虚拟显示器跟着变
+      // 远端分辨率已锁定。用本地缩放铺满窗口，而不是让服务器跟着浏览器改分辨率。
+      // 改分辨率会清空帧缓冲，300ms+ 时黑屏要持续数秒，看门狗接着重连，形成死循环。
+      r.scaleViewport = true;
+      r.resizeSession = false;
       r.showDotCursor = false;
       r.background = "#0b1120";
       // 沿用上一次探测到的链路档位：重连后不要又从高画质重新试探一遍，
@@ -526,7 +540,7 @@ export function GuiApp({ win }: { win: Win }) {
       let connected = false;
       const connTimer = setTimeout(() => {
         if (!connected && rfb === r) r.disconnect();
-      }, 12_000);
+      }, 30_000);
       r.addEventListener("connect", () => {
         connected = true;
         clearTimeout(connTimer);
@@ -564,8 +578,10 @@ export function GuiApp({ win }: { win: Win }) {
         setReconnecting(true); // 必须马上告诉用户在重连（画面已经冻住 / 变空白）
         // 刚才还连得好好的（网关定期掐断长连接、网络抖动）：会话几乎一定还在，直接重连，省掉一次状态查询的往返。
         // 只连上一下就断的不走这条路，免得服务器反复接受又断开时原地狂转。
-        if (connected && Date.now() - connectedAt > 3000) {
-          void connect();
+        if (connected && Date.now() - connectedAt > 8000) {
+          // 稍等再重连，避免代理刚掐断时立刻握手失败，把还没画完的首屏清掉。
+          await nap(1500);
+          if (!dead) void connect();
           return;
         }
         // 断线不等于应用没了：网络抖动、电脑休眠、代理掐断空闲连接、整台服务器被平台冻结时，应用都还在服务器上。
@@ -603,8 +619,11 @@ export function GuiApp({ win }: { win: Win }) {
     // 看门狗：连上之后定期自检。空白就重绘；重绘后仍空白 / 渲染队列卡死，就强制重连（会话不受影响，只是换一张新画布）
     const forceReconnect = (r: Rfb, why: string) => {
       const now = Date.now();
-      forcedReconnects = forcedReconnects.filter((t) => now - t < 120_000);
-      if (forcedReconnects.length >= 3) return; // 2 分钟内已经重连过 3 次还不行，别再折腾了
+      const slow = isSlowLink(netRef.current);
+      const windowMs = slow ? 180_000 : 120_000;
+      const max = slow ? 1 : 2;
+      forcedReconnects = forcedReconnects.filter((t) => now - t < windowMs);
+      if (forcedReconnects.length >= max) return;
       forcedReconnects.push(now);
       console.warn(`[gui] ${why}，重新连接`);
       r.disconnect();
@@ -616,28 +635,30 @@ export function GuiApp({ win }: { win: Win }) {
         lastHead = null;
         return;
       }
-      // 所有判定阈值都要跟着实测延迟放宽。
-      // 固定 3/5/4 秒的阈值在慢链路上是致命的：一屏画面本来就要传好几秒，
-      // 看门狗却按「卡死」处理并强制重连，重连后又要重新传一屏，于是永远收敛不了 ——
-      // 用户看到的就是「一直在闪、一直在重连」。链路越慢，越要给它时间，而不是越急着重连。
+      // 300ms+ 时一屏本来就要好几秒。把「还在传」当成卡死并重连，会把画布清空再重传，永远黑屏。
       const rtt = netRef.current;
-      const slow = Math.max(1, Math.min(6, rtt / 80)); // 1x ~ 6x 的宽容倍数
-      const GRACE = 3000 * slow; // 刚连上的首屏宽限
-      const Q_STUCK = 8000 * slow; // 渲染队列判定卡死
-      const BLANK_BAD = 8000 * slow; // 重绘后仍空白判定
+      const slow = isSlowLink(rtt);
+      const GRACE = slow ? 45_000 : 6_000;
+      const Q_STUCK = slow ? 60_000 : 12_000;
+      const BLANK_BAD = slow ? 90_000 : 16_000;
 
-      if (Date.now() - connectedAt < GRACE) return; // 刚连上，第一屏还在路上
+      if (Date.now() - connectedAt < GRACE) {
+        // 宽限期内如果还是全黑，只补一次完整画面请求，不拆连接。
+        if (canvasBlank(host) && Date.now() - connectedAt > 8_000 && !blankSince) {
+          blankSince = Date.now();
+          repaint(r, rfbCtor);
+        }
+        return;
+      }
 
-      // 1) 渲染队列卡死：队首长时间没变（比如某块图片解码失败，noVNC 会永远等下去）
       const q = (r as unknown as RfbInternals)._display?._renderQ;
       if (q && q.length > 0) {
-        // 关键修正：队首没变、但队列长度在变，说明数据还在源源不断地到，只是解码慢 —— 这不是卡死。
         const sig = `${String(q.length)}|${q[0] === lastHead ? "same" : "new"}`;
         if (q[0] !== lastHead || sig !== lastSig) {
           lastHead = q[0];
           lastSig = sig;
           headSince = Date.now();
-        } else if (Date.now() - headSince > Q_STUCK) {
+        } else if (!slow && Date.now() - headSince > Q_STUCK) {
           lastHead = null;
           return forceReconnect(r, "渲染队列卡住");
         }
@@ -646,13 +667,12 @@ export function GuiApp({ win }: { win: Win }) {
         lastSig = "";
       }
 
-      // 2) 可见画布空白。先尝试本地重绘（无需网络、无感知），只有重绘也救不回来才重连。
       if (canvasBlank(host)) {
-        if (!blankSince) {
+        if (!blankSince || Date.now() - blankSince > 8_000) {
           blankSince = Date.now();
-          console.warn("[gui] 画布空白，重绘");
+          console.warn("[gui] 画布空白，请求完整画面（不重连）");
           repaint(r, rfbCtor);
-        } else if (Date.now() - blankSince > BLANK_BAD) {
+        } else if (!slow && Date.now() - connectedAt > BLANK_BAD) {
           blankSince = 0;
           forceReconnect(r, "重绘后画布仍然空白");
         }
@@ -826,14 +846,14 @@ export function GuiApp({ win }: { win: Win }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(
             isBrowser
-              ? { preset: "browser", url: init.path, sidHint: win.guiSid, w: Math.round(box.width) || 1024, h: Math.round(box.height) || 640 }
+              ? { preset: "browser", url: init.path, sidHint: win.guiSid, w: capDim(box.width, 1024, 1024), h: capDim(box.height, 576, 576) }
               : win.external
                 ? {
                     external: { host: win.external.host, port: win.external.port },
                     sidHint: win.guiSid,
                     name: init.title || "外部桌面",
-                    w: Math.round(box.width) || 1024,
-                    h: Math.round(box.height) || 640,
+                    w: capDim(box.width, 1024, 1024),
+                    h: capDim(box.height, 576, 576),
                   }
                 : {
                     exec: cmd,
@@ -841,12 +861,13 @@ export function GuiApp({ win }: { win: Win }) {
                     sidHint: win.guiSid,
                     cwd: init.path,
                     name: init.title,
-                    w: Math.round(box.width) || 1024,
-                    h: Math.round(box.height) || 640,
+                    w: capDim(box.width, 1024, 1024),
+                    h: capDim(box.height, 576, 576),
                   },
           ),
         });
-        const d = (await res.json().catch(() => ({}))) as { sid?: string; error?: string };
+        const d = (await res.json().catch(() => ({}))) as { sid?: string; error?: string; password?: string };
+        if (d.password) saveExtPass(d.password);
         if (!res.ok || !d.sid) return end(d.error ?? "启动失败");
         sid = d.sid;
         sidRef.current = sid;
@@ -1196,7 +1217,7 @@ export function GuiApp({ win }: { win: Win }) {
               }}
             />
             <span>{net.rtt}ms</span>
-            {net.rtt >= 200 && <span className="text-slate-400">· 已降画质保流畅</span>}
+            {net.rtt >= 180 && <span className="text-slate-400">· 1024×576 / 低画质，避免黑屏重连</span>}
           </div>
         )}
 

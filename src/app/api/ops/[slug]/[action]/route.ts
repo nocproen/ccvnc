@@ -23,11 +23,11 @@ import {
   updateAdmin,
   verifyPassword,
 } from "@/lib/auth";
-import { execFile } from "child_process";
 import fsp from "fs/promises";
 import { HOME, ensureHome } from "@/lib/sys";
 import { systemStats, vncStatus } from "@/lib/sys-stats";
 import { writeVncPassword } from "@/lib/vnc-pass";
+import { restartVncDesktop } from "@/lib/vnc-launch";
 
 // 后台接口。路径中必须带正确的后台路径(slug)，否则一律返回 404，不暴露后台存在。
 
@@ -187,29 +187,23 @@ async function handle(req: Request, ctx: Ctx, method: "GET" | "POST") {
     return json({ ok: true, note: "VNC 密码已保存：重启 tigervncserver 后生效，网页端将直接连接无需再输入" });
   }
 
-  // 重启 tigervncserver（-AlwaysShared 允许网页与本地 VNC 客户端同时连接）
+  // 重启 tigervncserver。分辨率会被压到高延迟安全上限（默认 1024x576），避免黑屏重连。
   if (action === "vncrestart" && method === "POST") {
     const home = HOME;
     const before = await vncStatus(home);
     const display = typeof body.display === "string" && /^:\d+$/.test(body.display) ? (body.display as string) : before.display ?? ":1";
-    const geometry = typeof body.geometry === "string" && /^\d+x\d+$/.test(body.geometry) ? (body.geometry as string) : "1600x900";
+    const requested = typeof body.geometry === "string" ? body.geometry : undefined;
     try {
-      if (before.running && before.display) {
-        await new Promise<void>((resolve) => {
-          execFile("tigervncserver", ["-kill", before.display!], { timeout: 8000 }, () => resolve());
-        });
-      }
-      await new Promise<void>((resolve, reject) => {
-        execFile(
-          "tigervncserver",
-          [display, "-geometry", geometry, "-AlwaysShared"],
-          { timeout: 15_000 },
-          (err, _stdout, stderr) => (err ? reject(new Error(stderr || String(err))) : resolve()),
-        );
-      });
-      await sleep(1200);
+      const started = await restartVncDesktop(display, requested);
+      await sleep(400);
       const after = await vncStatus(home);
-      return json({ ok: true, vnc: after, note: after.running ? `${after.display} 已运行（端口 ${after.port}，几何 ${geometry}）` : "VNC 启动失败，请查看服务日志" });
+      return json({
+        ok: true,
+        vnc: after,
+        note: after.running
+          ? `${after.display} 已运行（端口 ${after.port}，几何 ${started.geometry}，8fps，已禁止客户端改分辨率）`
+          : "VNC 启动失败，请查看服务日志",
+      });
     } catch (e) {
       return json({ error: `重启 VNC 失败：${e instanceof Error ? e.message : String(e)}` }, 500);
     }
