@@ -3,7 +3,7 @@
 // 后台「VNC 设置」：查看 tigervncserver 运行状态、设置 VNC 密码（写入 ~/.vnc/passwd）、一键重启。
 import { useEffect, useState } from "react";
 
-type VncInfo = { running: boolean; display: string | null; port: number | null; passwdSet: boolean; server: string | null };
+type VncInfo = { running: boolean; display: string | null; port: number | null; geometry: string | null; passwdSet: boolean; server: string | null };
 type Api = (action: string, body?: object) => Promise<{ ok: boolean; status: number; data: Record<string, unknown> & { error?: string } }>;
 
 const card = "rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-xl";
@@ -68,7 +68,7 @@ export default function VncPanel({ api }: { api: Api }) {
             刷新
           </button>
         </div>
-        <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-5">
           <div className="rounded-lg bg-black/30 p-3">
             <div className="text-slate-500">运行状态</div>
             <div className={`mt-1 flex items-center gap-1.5 font-medium ${running ? "text-emerald-300" : "text-red-300"}`}>
@@ -85,6 +85,10 @@ export default function VncPanel({ api }: { api: Api }) {
             <div className="mt-1 font-medium text-slate-200">{info?.port ?? "—"}</div>
           </div>
           <div className="rounded-lg bg-black/30 p-3">
+            <div className="text-slate-500">当前分辨率</div>
+            <div className="mt-1 font-medium text-slate-200">{info?.geometry ?? "—"}</div>
+          </div>
+          <div className="rounded-lg bg-black/30 p-3">
             <div className="text-slate-500">VNC 密码文件</div>
             <div className={`mt-1 font-medium ${info?.passwdSet ? "text-emerald-300" : "text-amber-300"}`}>
               {info?.passwdSet ? "已设置" : "未设置"}
@@ -94,7 +98,7 @@ export default function VncPanel({ api }: { api: Api }) {
         {!running && (
           <div className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs text-amber-200">
             未检测到运行中的 VNC 服务。点下方「重启 VNC 服务」可直接拉起（
-            <code className="text-amber-100">tigervncserver :1 -geometry 1024x576 -FrameRate 8 -AcceptSetDesktopSize 0</code>
+            <code className="text-amber-100">tigervncserver :1 -geometry 1360x768 -FrameRate 8 -AcceptSetDesktopSize 0</code>
             ），否则请先在服务器上自行启动。
           </div>
         )}

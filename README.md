@@ -1,12 +1,20 @@
 # ccvnc WebDesktop（多人并发 · XFCE4 + TigerVNC 版）
 
 基于 Next.js 16 + PostgreSQL + Drizzle ORM 的网页桌面系统。
-本仓库在上游 [nocproen/des11](https://github.com/nocproen/des11.git) 基础上做了两件事：
+本仓库在上游 [nocproen/des11](https://github.com/nocproen/des11.git) 基础上持续补全桌面部署：
 
 1. **补全运行环境**（依赖、壁纸资源、`.env`、数据库表、修复原有 TypeScript 编译错误）
 2. **删除「只能 3 个人同时登录」的上限**（默认不限人数，可用 `DESKTOP_MAX_SESSIONS` 重新收紧）
 3. **修复后台「服务器终端」打不开**：`/api/admin-term/ws` 的 WebSocket 升级请求以前排在「桌面会话」总闸门之后，而后台页面没有 `wd_session` Cookie，握手一律被 401 拒绝；现已改为单独走管理员 Cookie(`wd_admin`) 鉴权
 4. **补全图形环境**：`xfce4` + `tigervncserver`（`~/.vnc/xstartup` → `exec startxfce4`，默认 `:1` / 5901）
+
+### 1360×768 与 300ms 以上网络延迟
+
+* `.env` 使用 `VNC_GEOMETRY=1360x768`、`VNC_FRAME_RATE=8`、`VNC_PASSWORD=<独立的 1–8 位 ASCII 密码>`。桌面密码、后台密码与 VNC 密码彼此独立，真实凭据仅保存在权限为 `0600` 的 `.env` 中，勿提交仓库。
+* TigerVNC 服务端只监听本地地址的 `:1` / `5901`。用户通过网站首页登录，再经 HTTPS/WSS 访问 noVNC；**不要将 5901 直接暴露到公网**。
+* 浏览器仅在本地缩放 1360×768 帧缓冲，不要求远端跟随浏览器改变分辨率；8fps + 帧差异检测 + WebSocket 积压控制减少高延迟时的旧帧堆积。先以最低 JPEG 画质和最高压缩连接，根据 RTT 逐步提升；300ms 以上持续使用低码率。
+* 代理断开时会保留最后一帧并退避重连，不因一次慢握手清除正确的 VNC 密码。本次沙箱以模拟 350ms RTT、约 2.6Mbps 测试了公网登录和远程桌面首帧。
+* 在后台的「VNC 设置」可以查看**实际分辨率**、修改 VNC 密码并重启桌面；命令行也可使用 `DISPLAY=:1 xdpyinfo | grep dimensions` 检查。
 
 ---
 
@@ -29,6 +37,8 @@ bash scripts/deploy.sh
 | `--max-sessions 0` | **同时在线人数**（0 = 不限制【默认】；1 = 旧的单人独占模式） |
 | `--db-url postgresql://u:p@host:5432/db` | 使用外部 PostgreSQL，跳过本机安装 |
 | `--desktop-password xxx` / `--admin-password xxx` | 指定密码（默认随机生成并在结尾打印） |
+| `--vnc-password xxx` | 独立的 TigerVNC 密码（最多 8 位 ASCII，默认随机生成并打印） |
+| `--vnc-geometry 1360x768` / `--vnc-fps 8` | 远端固定分辨率与最大帧率 |
 | `--admin-path ops-xxxx` | 后台入口路径 |
 | `--dir /opt/des11` | 安装目录 |
 | `--skip-deps` | 跳过系统依赖安装 |
@@ -60,7 +70,7 @@ bash scripts/deploy.sh
 
 | 位置 | 改动 |
 | --- | --- |
-| `src/lib/auth.ts` | `desk_active` 由「单个字符串」改为 **JSON 会话数组** `[{sid, at, exp}]`；新增 `DESKTOP_MAX_SESSIONS`（默认 3，范围 1–50） |
+| `src/lib/auth.ts` | `desk_active` 由「单个字符串」改为 **JSON 会话数组** `[{sid, at, exp}]`；新增 `DESKTOP_MAX_SESSIONS`（默认 0 = 不限制，范围 0–1000） |
 | `createDesktopToken()` | 事务 + 咨询锁内把新会话 **追加** 进列表；超过上限时按 **FIFO** 淘汰最早登录的那一个 |
 | `verifyDesktopToken()` | 从「必须等于唯一的 `desk_active`」改为「**存在于在线列表中即有效**」 |
 | Cookie | 一个 Cookie 用 `~` 串联最多 N 个令牌（`mergeDesktopCookie`），**同一浏览器的多个标签页也能各自登录** |

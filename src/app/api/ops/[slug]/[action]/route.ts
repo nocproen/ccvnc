@@ -187,7 +187,7 @@ async function handle(req: Request, ctx: Ctx, method: "GET" | "POST") {
     return json({ ok: true, note: "VNC 密码已保存：重启 tigervncserver 后生效，网页端将直接连接无需再输入" });
   }
 
-  // 重启 tigervncserver。分辨率会被压到高延迟安全上限（默认 1024x576），避免黑屏重连。
+  // 重启 tigervncserver。默认固定 1360x768 / 8fps，客户端仅在本地缩放以适配高延迟链路。
   if (action === "vncrestart" && method === "POST") {
     const home = HOME;
     const before = await vncStatus(home);

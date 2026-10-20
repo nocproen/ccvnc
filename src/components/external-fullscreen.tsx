@@ -105,7 +105,8 @@ async function readLocalClipboard(): Promise<string> {
 
 async function getStatus(sid: string): Promise<Status | "error"> {
   try {
-    const r = await fetch(`/api/gui/${sid}`, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
+    // 高延迟链路和沙箱唤醒期间不能将慢响应误判为会话结束。
+    const r = await fetch(`/api/gui/${sid}`, { cache: "no-store", signal: AbortSignal.timeout(20_000) });
     if (!r.ok) return "error";
     return (await r.json()) as Status;
   } catch {
@@ -136,6 +137,7 @@ function downloadPath(p: string) {
 
 export default function ExternalFullscreen({ onExit }: { onExit: () => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const ghostRef = useRef<HTMLDivElement>(null);
   const pasteCatcherRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const rfbRef = useRef<Rfb | null>(null);
@@ -149,6 +151,7 @@ export default function ExternalFullscreen({ onExit }: { onExit: () => void }) {
   const [err, setErr] = useState("");
   const [runKey, setRunKey] = useState(0);
   const [reconnecting, setReconnecting] = useState(false);
+  const [frozen, setFrozen] = useState(false);
   const [extPw, setExtPw] = useState("");
   const [extPwPrompt, setExtPwPrompt] = useState(false);
   const [sid, setSid] = useState<string | null>(null);
@@ -312,10 +315,46 @@ export default function ExternalFullscreen({ onExit }: { onExit: () => void }) {
     let rfb: Rfb | null = null;
     let serverPw = "";
     let connectedAt = 0;
+    let failedConnects = 0;
+    let pingBusy = false;
     let pingTimer: ReturnType<typeof setInterval> | undefined;
+    let paintTimer: ReturnType<typeof setInterval> | undefined;
+
+    const hasFrame = (element: HTMLElement | null) => {
+      const canvas = element?.querySelector("canvas");
+      if (!canvas || !canvas.width || !canvas.height) return false;
+      try {
+        const ctx = canvas.getContext("2d");
+        const pixel = ctx?.getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data;
+        return !!pixel && pixel[3] > 0;
+      } catch {
+        return false;
+      }
+    };
+    const releaseFrame = () => {
+      clearInterval(paintTimer);
+      ghostRef.current?.replaceChildren();
+      if (!dead) setFrozen(false);
+    };
+    const keepFrame = (screen: HTMLElement | null) => {
+      const ghost = ghostRef.current;
+      if (!ghost || !screen || !hasFrame(screen)) return;
+      clearInterval(paintTimer);
+      ghost.replaceChildren(screen);
+      setFrozen(true);
+    };
+    const releaseWhenPainted = () => {
+      if (!ghostRef.current?.firstChild) return;
+      clearInterval(paintTimer);
+      const start = Date.now();
+      paintTimer = setInterval(() => {
+        if (dead || hasFrame(host) || Date.now() - start > 45_000) releaseFrame();
+      }, 250);
+    };
 
     const end = (message: string) => {
       if (dead) return;
+      releaseFrame();
       setErr(message);
       setReconnecting(false);
       setPhase("ended");
@@ -323,11 +362,21 @@ export default function ExternalFullscreen({ onExit }: { onExit: () => void }) {
 
     const ping = async () => {
       const s = sidLocal;
-      if (!s || dead || document.hidden) return;
+      if (!s || dead || document.hidden || pingBusy) return;
+      pingBusy = true;
       const t0 = performance.now();
       const st = await getStatus(s);
       const ms = Math.round(performance.now() - t0);
+      pingBusy = false;
       if (dead || st === "error") return;
+      const r = rfbRef.current;
+      // 先收完首屏再考虑提画质：在 300ms+ 链路上反复切换编码会触发整屏重传。
+      if (r && Date.now() - connectedAt >= 20_000) {
+        const roundTrip = Math.max(ms, st.rtt ?? 0);
+        const profile = roundTrip >= 250 ? { q: 0, c: 9 } : roundTrip >= 150 ? { q: 1, c: 8 } : roundTrip >= 80 ? { q: 2, c: 7 } : { q: 4, c: 4 };
+        if (r.compressionLevel !== profile.c) r.compressionLevel = profile.c;
+        if (r.qualityLevel !== profile.q) r.qualityLevel = profile.q;
+      }
       setLatency({ client: ms, server: Math.round(st.rtt ?? 0) });
       setLatHistory((h) => [...h.slice(-29), ms]);
     };
@@ -351,32 +400,41 @@ export default function ExternalFullscreen({ onExit }: { onExit: () => void }) {
         shared: true,
         credentials: { password: pw },
       });
+      const screen = host.firstElementChild as HTMLElement | null;
       rfb = r;
       rfbRef.current = r;
-      r.scaleViewport = false;
-      r.resizeSession = true;
+      // 固定服务端 1360×768，浏览器只在本地缩放。远端改尺寸会清空帧缓冲并导致慢网反复黑屏。
+      r.scaleViewport = true;
+      r.resizeSession = false;
       r.showDotCursor = false;
       r.background = "#0b1120";
-      r.qualityLevel = 7;
-      r.compressionLevel = 2;
-      r.addEventListener("credentialsrequired", () => {
+      r.qualityLevel = 0;
+      r.compressionLevel = 9;
+      let authFailed = false;
+      const promptForPassword = () => {
+        authFailed = true;
         saveExtPass("");
         setExtPwPrompt(true);
-      });
+      };
+      r.addEventListener("credentialsrequired", promptForPassword);
+      r.addEventListener("securityfailure", promptForPassword);
       let connected = false;
+      // 代理唤醒、握手与 300ms+ RTT 叠加时 12 秒不足以证明密码错误。
       const connTimer = setTimeout(() => {
         if (!connected && rfb === r) r.disconnect();
-      }, 12_000);
+      }, 30_000);
       r.addEventListener("connect", () => {
         connected = true;
+        failedConnects = 0;
         clearTimeout(connTimer);
         connectedAt = Date.now();
         setReconnecting(false);
         setPhase("running");
         r.focus();
         clearInterval(pingTimer);
-        pingTimer = setInterval(() => void ping(), 2000);
+        pingTimer = setInterval(() => void ping(), 5000);
         void ping();
+        releaseWhenPainted();
       });
       // 远程复制的文本：自动同步到本机剪贴板（或在复制快捷键后的短时间内同步）
       r.addEventListener("clipboard", (e) => {
@@ -392,23 +450,29 @@ export default function ExternalFullscreen({ onExit }: { onExit: () => void }) {
       });
       r.addEventListener("disconnect", async () => {
         clearTimeout(connTimer);
+        clearInterval(pingTimer);
         if (dead) return;
         if (rfbRef.current === r) rfbRef.current = null;
-        if (!connected) {
-          saveExtPass("");
-          setExtPwPrompt(true);
-          return;
-        }
+        if (authFailed) return; // 只有 noVNC 明确报告认证失败才重新询问密码
+        if (connected) keepFrame(screen);
         setReconnecting(true);
-        if (Date.now() - connectedAt > 3000) {
-          void connect();
+        // 已连接较久的会话遇到代理断线，服务器仍在：等旧连接释放后再握手。
+        if (connected && Date.now() - connectedAt > 8000) {
+          await sleep(1500);
+          if (!dead) void connect();
           return;
         }
-        let wait = 600;
+        let wait = 1200;
         for (;;) {
           const st = sidLocal ? await getStatus(sidLocal) : "error";
           if (dead) return;
           if (st !== "error" && st.state === "running") {
+            // 连握手都没走完时限速重试，避免代理持续超时造成请求风暴。
+            if (!connected) {
+              failedConnects++;
+              await sleep(Math.min(1000 + failedConnects * 1200, 8000));
+              if (dead) return;
+            }
             void connect();
             return;
           }
@@ -417,20 +481,21 @@ export default function ExternalFullscreen({ onExit }: { onExit: () => void }) {
           }
           await sleep(wait);
           if (dead) return;
-          wait = Math.min(wait * 1.6, 15_000);
+          wait = Math.min(wait * 1.6, document.hidden ? 45_000 : 15_000);
         }
       });
     };
 
     (async () => {
       setPhase("preparing");
+      setFrozen(false);
       setErr("");
       setLatency(null);
       try {
         const res = await fetch("/api/gui", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ external: { port: EXT_VNC_PORT }, name: "远程桌面", w: 1920, h: 1080 }),
+          body: JSON.stringify({ external: { port: EXT_VNC_PORT }, name: "远程桌面", w: 1360, h: 768 }),
         });
         const d = (await res.json().catch(() => ({}))) as { sid?: string; error?: string; password?: string };
         if (!res.ok || !d.sid) return end(d.error ?? "连接失败");
@@ -460,6 +525,8 @@ export default function ExternalFullscreen({ onExit }: { onExit: () => void }) {
     return () => {
       dead = true;
       clearInterval(pingTimer);
+      clearInterval(paintTimer);
+      ghostRef.current?.replaceChildren();
       rfb?.disconnect();
       rfbRef.current = null;
       if (sidLocal) void fetch(`/api/gui/${sidLocal}`, { method: "DELETE", keepalive: true }).catch(() => {});
@@ -601,6 +668,7 @@ export default function ExternalFullscreen({ onExit }: { onExit: () => void }) {
         }}
       >
         <div ref={hostRef} className="absolute inset-0" />
+        <div ref={ghostRef} className="pointer-events-none absolute inset-0 z-10 overflow-hidden" aria-hidden="true" />
 
         {dragOver && (
           <div className="pointer-events-none absolute inset-0 z-30 grid place-items-center border-4 border-dashed border-sky-400 bg-sky-500/10">
@@ -617,7 +685,15 @@ export default function ExternalFullscreen({ onExit }: { onExit: () => void }) {
           </div>
         )}
 
-        {reconnecting && phase === "running" && (
+        {frozen && phase === "running" && (
+          <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center">
+            <div className="flex items-center gap-2 rounded-full bg-black/70 px-4 py-2 text-xs text-slate-200 shadow-lg backdrop-blur">
+              <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-white/20 border-t-sky-400" />
+              {reconnecting ? "网络波动，正在重连（显示上次画面）…" : "已恢复连接，等待最新画面…"}
+            </div>
+          </div>
+        )}
+        {reconnecting && !frozen && phase === "running" && (
           <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center">
             <div className="rounded-xl bg-black/60 px-6 py-4 text-center text-slate-200 shadow-lg backdrop-blur">
               <div className="mx-auto mb-3 h-7 w-7 animate-spin rounded-full border-2 border-white/20 border-t-sky-400" />

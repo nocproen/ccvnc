@@ -47,7 +47,7 @@ export const DESKTOP_UNLIMITED = DESKTOP_MAX_SESSIONS <= 0;
 const COOKIE_MAX_TOKENS = 8;
 
 export const DEFAULT_ADMIN_USER = process.env.ADMIN_USER || "admin";
-const INITIAL_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin@Des11#2026";
+const INITIAL_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "";
 
 type Try = { n: number; first: number; lock: number };
 type State = {

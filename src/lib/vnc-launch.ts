@@ -3,17 +3,16 @@ import fsp from "fs/promises";
 import os from "os";
 import path from "path";
 
-// 300ms+ 延迟下，1600x900 / 随浏览器放大分辨率会让首屏更新要传好几秒。
-// 看门狗会把「还在传」误判成卡死并强制重连，重连又把画布清空 —— 表现就是黑屏后反复重连。
-// 这里把远端帧缓冲锁死在一个小尺寸，帧率压到 8fps，并禁止客户端改分辨率。
+// 固定 1360×768 的服务端帧缓冲；300ms+ 链路使用 8fps、差异帧及浏览器端缩放，
+// 避免远端随客户端视口变化而重传整屏，降低高延迟下的黑屏及排队积压。
 export const VNC_DISPLAY = ":1";
 export const VNC_PORT = 5901;
 export const VNC_DEPTH = "24";
 
-const MAX_W = 1280;
-const MAX_H = 720;
-const DEFAULT_W = 1024;
-const DEFAULT_H = 576;
+const MAX_W = 1360;
+const MAX_H = 768;
+const DEFAULT_W = 1360;
+const DEFAULT_H = 768;
 
 const holder = globalThis as unknown as {
   __wdVncKeeper?: boolean;
@@ -264,9 +263,9 @@ export function ensureVncDesktop() {
     }
     const listed = await listDisplay(VNC_DISPLAY);
     const geo = listed.running ? await readGeometry(home, VNC_DISPLAY) : null;
-    const [maxW, maxH] = geometry.split("x").map(Number);
-    const tooBig = !!geo && (geo.w > maxW + 8 || geo.h > maxH + 8);
-    const stale = listed.running && (have !== want || tooBig);
+    const [targetW, targetH] = geometry.split("x").map(Number);
+    const wrongGeometry = !!geo && (geo.w !== targetW || geo.h !== targetH);
+    const stale = listed.running && (have !== want || wrongGeometry);
     const recently = Date.now() - (holder.__wdVncGeoRestart ?? 0) < 60_000;
     if (listed.running && stale && !recently) {
       holder.__wdVncGeoRestart = Date.now();

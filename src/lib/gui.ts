@@ -749,9 +749,9 @@ export async function createGui(o: GuiOpts): Promise<{ g: Gui; reused: boolean }
     name: (name || exec.split(/\s+/)[0].split("/").pop() || "应用").slice(0, 80),
     exec,
     cwd,
-    // 上限锁在 1024x576：更大的帧缓冲在 300ms+ 延迟下首屏经常传不完，触发黑屏重连。
-    w: clamp(o.w, 320, 1024, 1024),
-    h: clamp(o.h, 240, 576, 576),
+    // 外部共享桌面固定 1360×768；独立图形应用仍限 1024×576，避免慢网无谓传输。
+    w: isExternal ? clamp(o.w, 640, 1360, 1360) : clamp(o.w, 320, 1024, 1024),
+    h: isExternal ? clamp(o.h, 360, 768, 768) : clamp(o.h, 240, 576, 576),
     state: "preparing",
     note: "",
     log: "",

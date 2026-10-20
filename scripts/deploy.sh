@@ -30,6 +30,9 @@ DESKTOP_PASSWORD="${DESKTOP_PASSWORD:-}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 ADMIN_PATH="${ADMIN_PATH:-}"
+VNC_PASSWORD="${VNC_PASSWORD:-}"
+VNC_GEOMETRY="${VNC_GEOMETRY:-}"
+VNC_FRAME_RATE="${VNC_FRAME_RATE:-}"
 DESKTOP_MAX_SESSIONS="${DESKTOP_MAX_SESSIONS:-0}"   # ★ 同时在线人数，0 = 不限制（3 人上限已删除）
 NODE_MAJOR="${NODE_MAJOR:-22}"
 SKIP_DEPS="${SKIP_DEPS:-0}"
@@ -66,6 +69,9 @@ ${C_B}des11 WebDesktop 一键部署脚本${C_0}
   --admin-user <账号>       后台账号（默认 admin）
   --admin-password <密码>   后台密码（默认随机生成并打印）
   --admin-path <路径>       后台入口路径（默认随机生成）
+  --vnc-password <密码>     TigerVNC 密码（1-8 位 ASCII 字符，默认随机生成）
+  --vnc-geometry <宽x高>   VNC 分辨率（默认 1360x768）
+  --vnc-fps <帧率>         VNC 最大帧率（默认 8fps，范围 4-12）
   --max-sessions <N>        ★ 同时在线人数，0 = 不限制（默认）；1 = 旧的单人模式
   --node-major <版本>       需要的 Node 主版本（默认 22）
   --skip-deps               跳过系统依赖安装（已自备 node/git/psql 时使用）
@@ -91,6 +97,9 @@ while [[ $# -gt 0 ]]; do
     --admin-user) ADMIN_USER="$2"; shift 2;;
     --admin-password) ADMIN_PASSWORD="$2"; shift 2;;
     --admin-path) ADMIN_PATH="$2"; shift 2;;
+    --vnc-password) VNC_PASSWORD="$2"; shift 2;;
+    --vnc-geometry) VNC_GEOMETRY="$2"; shift 2;;
+    --vnc-fps) VNC_FRAME_RATE="$2"; shift 2;;
     --max-sessions) DESKTOP_MAX_SESSIONS="$2"; shift 2;;
     --node-major) NODE_MAJOR="$2"; shift 2;;
     --skip-deps) SKIP_DEPS=1; shift;;
@@ -189,6 +198,19 @@ install_system_deps() {
     brew)   brew install "${base_pkgs[@]}" || warn "部分基础依赖安装失败";;
   esac
   ok "基础依赖就绪"
+
+  if [[ "$PKG" == "apt" ]]; then
+    log "安装 XFCE4、TigerVNC、Chromium 与中文字体（首次可能耗时数分钟）"
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      tigervnc-standalone-server tigervnc-tools xfce4 xfce4-terminal openbox dbus-x11 \
+      x11-utils x11-xserver-utils xauth xfonts-base xterm xclip xsel xdotool \
+      fonts-dejavu-core fonts-noto-cjk fonts-noto-color-emoji xdg-utils \
+      python3-gi gir1.2-gtk-3.0 python3-pil pcmanfm chromium chromium-l10n \
+      || die "图形环境安装失败；请检查 apt 软件源后重试"
+    ok "图形桌面依赖就绪"
+  else
+    warn "非 apt 系统需自行安装 tigervncserver、xfce4、xdpyinfo、dbus 与图形程序依赖"
+  fi
 }
 
 node_major_version() { have node && node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
@@ -350,6 +372,9 @@ write_env() {
   DESKTOP_PASSWORD="${DESKTOP_PASSWORD:-$(env_get DESKTOP_PASSWORD)}"
   ADMIN_PASSWORD="${ADMIN_PASSWORD:-$(env_get ADMIN_PASSWORD)}"
   ADMIN_PATH="${ADMIN_PATH:-$(env_get ADMIN_PATH)}"
+  VNC_PASSWORD="${VNC_PASSWORD:-$(env_get VNC_PASSWORD)}"
+  VNC_GEOMETRY="${VNC_GEOMETRY:-$(env_get VNC_GEOMETRY)}"
+  VNC_FRAME_RATE="${VNC_FRAME_RATE:-$(env_get VNC_FRAME_RATE)}"
   local auth_key; auth_key="$(env_get AUTH_KEY)"
 
   GENERATED_DESKTOP=0; GENERATED_ADMIN=0
@@ -357,6 +382,12 @@ write_env() {
   [[ -z "$ADMIN_PASSWORD"   ]] && { ADMIN_PASSWORD="$(rand 20)";   GENERATED_ADMIN=1; }
   [[ -z "$ADMIN_PATH"       ]] && ADMIN_PATH="ops-$(rand 10 | tr 'A-Z' 'a-z')"
   [[ -z "$auth_key"         ]] && auth_key="$(rand 48)"
+  [[ -z "$VNC_PASSWORD"     ]] && VNC_PASSWORD="$(rand 8)"
+  VNC_GEOMETRY="${VNC_GEOMETRY:-1360x768}"
+  VNC_FRAME_RATE="${VNC_FRAME_RATE:-8}"
+  [[ "$VNC_PASSWORD" =~ ^[A-Za-z0-9]{1,8}$ ]] || die "VNC 密码必须为 1-8 位 ASCII 字母或数字"
+  [[ "$VNC_GEOMETRY" =~ ^[0-9]{3,4}x[0-9]{3,4}$ ]] || die "VNC 分辨率须为 宽x高（例如 1360x768）"
+  [[ "$VNC_FRAME_RATE" =~ ^([4-9]|1[0-2])$ ]] || die "VNC 帧率范围须为 4-12"
 
   log "写入环境配置 ${envf}"
   cat > "$envf" <<EOF
@@ -369,6 +400,10 @@ ADMIN_PATH=${ADMIN_PATH}
 
 DESKTOP_PASSWORD=${DESKTOP_PASSWORD}
 AUTH_KEY=${auth_key}
+
+VNC_PASSWORD=${VNC_PASSWORD}
+VNC_GEOMETRY=${VNC_GEOMETRY}
+VNC_FRAME_RATE=${VNC_FRAME_RATE}
 
 # ★ 允许同时在线的人数（1 = 单人独占的旧行为）
 DESKTOP_MAX_SESSIONS=${DESKTOP_MAX_SESSIONS}
@@ -480,7 +515,7 @@ write_env
 build_app
 stop_running
 if [[ "$USE_SYSTEMD" == "yes" ]]; then start_systemd; else start_nohup; fi
-health_check || true
+health_check || die "服务未通过健康检查，请检查 ${LOG_FILE} 或 systemd 日志"
 
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"; [[ -z "$IP" ]] && IP="127.0.0.1"
 echo
@@ -493,6 +528,8 @@ echo "  后台地址    : http://${IP}:${PORT}/$(env_get ADMIN_PATH)"
 echo "  后台账号    : ${ADMIN_USER}"
 echo "  后台密码    : $(env_get ADMIN_PASSWORD)"
 echo "  桌面密码    : $(env_get DESKTOP_PASSWORD)"
+echo "  VNC 密码    : $(env_get VNC_PASSWORD)"
+echo "  VNC 配置    : $(env_get VNC_GEOMETRY) / $(env_get VNC_FRAME_RATE)fps (本机 :1 / 5901)"
 echo "  同时在线    : ${SEAT_LABEL}"
 echo
 if [[ "$USE_SYSTEMD" == "yes" ]]; then
@@ -506,4 +543,4 @@ fi
 echo "  更新升级    : bash ${APP_DIR}/scripts/deploy.sh --update"
 echo "  改并发人数  : bash ${APP_DIR}/scripts/deploy.sh --max-sessions 3"
 echo
-warn "请尽快登录后台修改默认密码，并通过防火墙/反向代理限制访问来源。"
+warn "请妥善保管随机密码，通过 HTTPS 与防火墙/反向代理限制访问来源。"

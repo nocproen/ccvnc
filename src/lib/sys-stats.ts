@@ -38,6 +38,7 @@ export type VncInfo = {
   running: boolean;
   display: string | null;
   port: number | null;
+  geometry: string | null;
   passwdSet: boolean;
   server: string | null;
 };
@@ -100,7 +101,7 @@ export async function systemStats(): Promise<SystemStats> {
 
 /** 通过 tigervncserver -list 解析当前运行的 VNC 会话 */
 export async function vncStatus(home: string): Promise<VncInfo> {
-  const info: VncInfo = { running: false, display: null, port: null, passwdSet: false, server: null };
+  const info: VncInfo = { running: false, display: null, port: null, geometry: null, passwdSet: false, server: null };
   try {
     const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
       execFile("tigervncserver", ["-list"], { timeout: 8000 }, (err, stdout) => {
@@ -136,6 +137,22 @@ export async function vncStatus(home: string): Promise<VncInfo> {
       }
     } catch {
       /* ignore */
+    }
+  }
+  if (info.running && info.display) {
+    try {
+      const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
+        execFile("xdpyinfo", ["-display", info.display!], {
+          timeout: 5000,
+          env: { ...process.env, XAUTHORITY: `${home}/.Xauthority` },
+        }, (err, stdout) => {
+          if (err) return reject(err);
+          resolve({ stdout });
+        });
+      });
+      info.geometry = /dimensions:\s+(\d+x\d+)/.exec(stdout)?.[1] ?? null;
+    } catch {
+      // 状态接口在 X11 暂不可用时仍能返回 VNC 服务信息。
     }
   }
   try {
